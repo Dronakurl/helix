@@ -150,7 +150,9 @@ impl Prompt {
         &'a self,
         editor: &'a Editor,
     ) -> Option<Cow<'a, str>> {
-        self.history_register
+        // Avoid reading from clipboard registers (* and +) as it may be expensive
+        // (spawns external commands) and can cause glitching
+        self.history_register.filter(|&reg| !matches!(reg, '*' | '+'))
             .and_then(|reg| editor.registers.first(reg, editor))
     }
 
