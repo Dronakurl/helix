@@ -4205,7 +4205,9 @@ pub fn complete_command_args(
     };
 
     // Don't complete on closed tokens, for example after writing a closing double quote.
-    if token.is_terminated {
+    // However, we do allow completion for terminated quoted tokens (single/backtick quotes)
+    // so that users can continue tab-completing paths with spaces.
+    if token.is_terminated && !matches!(token.kind, TokenKind::Quoted(_)) {
         return Vec::new();
     }
 
@@ -4305,8 +4307,17 @@ fn quote_completion<'a>(
             ((offset + token.content_start).., span)
         }
         TokenKind::Quoted(quote) => {
-            span.content = replace(span.content, quote.char(), quote.escape());
-            ((range.start + offset + token.content_start).., span)
+            // For quoted tokens, we need to replace the content inside the quotes.
+            // The opening quote stays in place. We replace from the start of content
+            // (after opening quote) and add the closing quote to the span content.
+            let quote_char = quote.char();
+            span.content = Cow::Owned(format!(
+                "{}{}",
+                replace(span.content, quote_char, quote.escape()),
+                quote_char
+            ));
+            // Start from the first character of the content (after opening quote)
+            ((offset + token.content_start).., span)
         }
         TokenKind::Expand => {
             // NOTE: `token.content_start` is already accounted for in `offset` for `Expand`

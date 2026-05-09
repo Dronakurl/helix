@@ -390,6 +390,19 @@ impl Prompt {
 
         self.line.replace_range(range.clone(), &item.content);
 
+        // If the completion ends with a single or backtick quote, position cursor before it
+        // to allow the user to continue typing inside the quoted string
+        if let Some(last_char) = item.content.chars().last() {
+            if last_char == '\'' || last_char == '`' {
+                // Move cursor back by one to position before the closing quote
+                let pos = self.line.len();
+                if pos > 0 {
+                    self.cursor = pos - 1;
+                    return;
+                }
+            }
+        }
+
         self.move_end();
     }
 
@@ -717,14 +730,13 @@ impl Component for Prompt {
             }
             key!(Tab) => {
                 self.change_completion_selection(CompletionDirection::Forward);
-                // if single completion candidate is a directory list content in completion
-                if self.completion.len() == 1 && self.line.ends_with(std::path::MAIN_SEPARATOR) {
-                    self.recalculate_completion(cx.editor);
-                }
+                // Recalculate completions after applying a completion since the line has changed.
+                self.recalculate_completion(cx.editor);
                 (self.callback_fn)(cx, &self.line, PromptEvent::Update)
             }
             shift!(Tab) => {
                 self.change_completion_selection(CompletionDirection::Backward);
+                self.recalculate_completion(cx.editor);
                 (self.callback_fn)(cx, &self.line, PromptEvent::Update)
             }
             ctrl!('q') => self.exit_selection(),
