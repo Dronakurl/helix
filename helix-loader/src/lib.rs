@@ -5,6 +5,8 @@ pub mod workspace_trust;
 use helix_stdx::{env::current_working_dir, path};
 
 use etcetera::base_strategy::{choose_base_strategy, BaseStrategy};
+use once_cell::sync::Lazy;
+use parking_lot::RwLock;
 use std::path::{Path, PathBuf};
 
 pub const VERSION_AND_GIT_HASH: &str = env!("VERSION_AND_GIT_HASH");
@@ -15,6 +17,9 @@ static RUNTIME_DIRS: once_cell::sync::Lazy<Vec<PathBuf>> =
 static CONFIG_FILE: once_cell::sync::OnceCell<PathBuf> = once_cell::sync::OnceCell::new();
 
 static LOG_FILE: once_cell::sync::OnceCell<PathBuf> = once_cell::sync::OnceCell::new();
+
+/// Cache for the workspace path to avoid repeated directory tree walks
+static WORKSPACE: Lazy<RwLock<Option<(PathBuf, bool)>>> = Lazy::new(|| RwLock::new(None));
 
 pub fn initialize_config_file(specified_file: Option<PathBuf>) {
     let config_file = specified_file.unwrap_or_else(default_config_file);
@@ -261,10 +266,36 @@ pub fn merge_toml_values(left: toml::Value, right: toml::Value, merge_depth: usi
 /// This function starts searching the FS upward from the CWD
 /// and returns the first directory that contains either `.git`, `.svn`, `.jj` or `.helix`.
 /// If no workspace was found returns (CWD, true).
-/// Otherwise (workspace, false) is returned
+/// Otherwise (workspace, false) is returned.
+/// 
+/// The result is cached to avoid repeated directory tree walks during startup.
 pub fn find_workspace() -> (PathBuf, bool) {
+    // Check if we have a cached value
+    {
+        let guard = WORKSPACE.read();
+        if let Some(workspace) = &*guard {
+            return workspace.clone();
+        }
+    }
+    
+    // No cached value, compute it
     let current_dir = current_working_dir();
-    find_workspace_in(current_dir)
+    let workspace = find_workspace_in(current_dir);
+    
+    // Cache the result
+    {
+        let mut guard = WORKSPACE.write();
+        *guard = Some(workspace.clone());
+    }
+    
+    workspace
+}
+
+/// Clears the cached workspace path.
+/// This should be called when the current working directory changes.
+pub fn clear_workspace_cache() {
+    let mut guard = WORKSPACE.write();
+    *guard = None;
 }
 
 pub fn find_workspace_in(dir: impl AsRef<Path>) -> (PathBuf, bool) {

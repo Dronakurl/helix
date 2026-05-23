@@ -2405,6 +2405,8 @@ impl Editor {
 
     pub fn set_cwd(&mut self, path: &Path) -> std::io::Result<()> {
         self.last_cwd = helix_stdx::env::set_current_working_dir(path)?;
+        // Clear workspace cache since working directory changed
+        helix_loader::clear_workspace_cache();
         self.clear_doc_relative_paths();
         Ok(())
     }
