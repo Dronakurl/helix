@@ -1507,8 +1507,17 @@ fn reload(cx: &mut compositor::Context, _args: Args, event: PromptEvent) -> anyh
     }
 
     let scrolloff = cx.editor.config().scrolloff;
+    let diff_base_revision = doc!(cx.editor)
+        .path()
+        .and_then(|path| cx.editor.diff_base_override(path))
+        .map(ToOwned::to_owned);
     let (view, doc) = current!(cx.editor);
-    doc.reload(view, &cx.editor.diff_providers).map(|_| {
+    doc.reload(
+        view,
+        &cx.editor.diff_providers,
+        diff_base_revision.as_deref(),
+    )
+    .map(|_| {
         view.ensure_cursor_in_view(doc, scrolloff);
     })?;
     if let Some(path) = doc.path().map(ToOwned::to_owned) {
@@ -1544,6 +1553,10 @@ fn reload_all(cx: &mut compositor::Context, _args: Args, event: PromptEvent) -> 
         .collect();
 
     for (doc_id, view_ids) in docs_view_ids {
+        let diff_base_revision = doc!(cx.editor, &doc_id)
+            .path()
+            .and_then(|path| cx.editor.diff_base_override(path))
+            .map(ToOwned::to_owned);
         let doc = doc_mut!(cx.editor, &doc_id);
 
         // Every doc is guaranteed to have at least 1 view at this point.
@@ -1552,7 +1565,11 @@ fn reload_all(cx: &mut compositor::Context, _args: Args, event: PromptEvent) -> 
         // Ensure that the view is synced with the document's history.
         view.sync_changes(doc);
 
-        if let Err(error) = doc.reload(view, &cx.editor.diff_providers) {
+        if let Err(error) = doc.reload(
+            view,
+            &cx.editor.diff_providers,
+            diff_base_revision.as_deref(),
+        ) {
             cx.editor.set_error(format!("{}", error));
             continue;
         }
@@ -2334,6 +2351,52 @@ fn language(cx: &mut compositor::Context, args: Args, event: PromptEvent) -> any
     let diagnostics =
         Editor::doc_diagnostics(&cx.editor.language_servers, &cx.editor.diagnostics, doc);
     doc.replace_diagnostics(diagnostics, &[], None);
+    Ok(())
+}
+
+fn set_diff_base(
+    cx: &mut compositor::Context,
+    args: Args,
+    event: PromptEvent,
+) -> anyhow::Result<()> {
+    if event != PromptEvent::Validate {
+        return Ok(());
+    }
+
+    let revision = args
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("expected a branch name or commit SHA"))?
+        .to_string();
+    let path = doc!(cx.editor)
+        .path()
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| anyhow::anyhow!("current buffer has no path"))?;
+
+    cx.editor.set_diff_base_override(&path, revision.clone())?;
+    cx.editor.set_status(format!("Diff base set to {revision}"));
+    Ok(())
+}
+
+fn reset_diff_base(
+    cx: &mut compositor::Context,
+    _args: Args,
+    event: PromptEvent,
+) -> anyhow::Result<()> {
+    if event != PromptEvent::Validate {
+        return Ok(());
+    }
+
+    let path = doc!(cx.editor)
+        .path()
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| anyhow::anyhow!("current buffer has no path"))?;
+
+    let removed = cx.editor.clear_diff_base_override(&path)?;
+    cx.editor.set_status(if removed {
+        "Diff base reset to HEAD"
+    } else {
+        "Diff base already uses HEAD"
+    });
     Ok(())
 }
 
@@ -3702,6 +3765,28 @@ pub const TYPABLE_COMMAND_LIST: &[TypableCommand] = &[
         completer: CommandCompleter::positional(&[completers::language]),
         signature: Signature {
             positionals: (0, Some(1)),
+            ..Signature::DEFAULT
+        },
+    },
+    TypableCommand {
+        name: "set-diff-base",
+        aliases: &[],
+        doc: "Set the git diff base for the current repository to a branch name or commit SHA.",
+        fun: set_diff_base,
+        completer: CommandCompleter::none(),
+        signature: Signature {
+            positionals: (1, Some(1)),
+            ..Signature::DEFAULT
+        },
+    },
+    TypableCommand {
+        name: "reset-diff-base",
+        aliases: &[],
+        doc: "Reset the git diff base for the current repository back to HEAD.",
+        fun: reset_diff_base,
+        completer: CommandCompleter::none(),
+        signature: Signature {
+            positionals: (0, Some(0)),
             ..Signature::DEFAULT
         },
     },

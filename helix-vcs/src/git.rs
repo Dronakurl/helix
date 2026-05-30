@@ -2,7 +2,7 @@ use anyhow::{bail, Context, Result};
 use arc_swap::ArcSwap;
 use gix::filter::plumbing::driver::apply::Delay;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use gix::bstr::ByteSlice;
@@ -27,7 +27,7 @@ fn get_repo_dir(file: &Path) -> Result<&Path> {
     file.parent().context("file has no parent directory")
 }
 
-pub fn get_diff_base(file: &Path) -> Result<Vec<u8>> {
+pub fn get_diff_base(file: &Path, diff_base_revision: Option<&str>) -> Result<Vec<u8>> {
     debug_assert!(!file.exists() || file.is_file());
     debug_assert!(file.is_absolute());
     let file = gix::path::realpath(file).context("resolve symlinks")?;
@@ -38,8 +38,12 @@ pub fn get_diff_base(file: &Path) -> Result<Vec<u8>> {
     let repo = open_repo(repo_dir)
         .context("failed to open git repo")?
         .to_thread_local();
-    let head = repo.head_commit()?;
-    let file_oid = find_file_in_commit(&repo, &head, &file)?;
+    let diff_base = resolve_diff_base_commit(&repo, diff_base_revision)?;
+    let file_oid = match find_file_in_commit(&repo, &diff_base, &file)? {
+        Some(file_oid) => file_oid,
+        None if diff_base_revision.is_some() => return Ok(Vec::new()),
+        None => bail!("file is untracked"),
+    };
 
     let file_object = repo.find_object(file_oid)?;
     let data = file_object.detach().data;
@@ -57,6 +61,28 @@ pub fn get_diff_base(file: &Path) -> Result<Vec<u8>> {
     } else {
         Ok(data)
     }
+}
+
+pub fn ensure_diff_base(file: &Path, diff_base_revision: &str) -> Result<()> {
+    debug_assert!(file.is_absolute());
+    let file = gix::path::realpath(file).context("resolve symlinks")?;
+    let repo_dir = get_repo_dir(&file)?;
+    let repo = open_repo(repo_dir)
+        .context("failed to open git repo")?
+        .to_thread_local();
+    resolve_diff_base_commit(&repo, Some(diff_base_revision))?;
+    Ok(())
+}
+
+pub fn get_repo_root(file: &Path) -> Result<PathBuf> {
+    debug_assert!(file.is_absolute());
+    let file = gix::path::realpath(file).context("resolve symlinks")?;
+    let repo_dir = get_repo_dir(&file)?;
+    let repo = open_repo(repo_dir)
+        .context("failed to open git repo")?
+        .to_thread_local();
+    let work_dir = repo.workdir().context("repo has no worktree")?;
+    gix::path::realpath(work_dir).context("resolve repo worktree")
 }
 
 pub fn get_current_head_name(file: &Path) -> Result<Arc<ArcSwap<Box<str>>>> {
@@ -201,19 +227,42 @@ fn status(repo: &Repository, f: impl Fn(Result<FileChange>) -> bool) -> Result<(
 }
 
 /// Finds the object that contains the contents of a file at a specific commit.
-fn find_file_in_commit(repo: &Repository, commit: &Commit, file: &Path) -> Result<ObjectId> {
+fn find_file_in_commit(
+    repo: &Repository,
+    commit: &Commit,
+    file: &Path,
+) -> Result<Option<ObjectId>> {
     let repo_dir = repo.workdir().context("repo has no worktree")?;
     let rel_path = file.strip_prefix(repo_dir)?;
     let tree = commit.tree()?;
-    let tree_entry = tree
-        .lookup_entry_by_path(rel_path)?
-        .context("file is untracked")?;
+    let Some(tree_entry) = tree.lookup_entry_by_path(rel_path)? else {
+        return Ok(None);
+    };
     match tree_entry.mode().kind() {
         // not a file, everything is new, do not show diff
         mode @ (EntryKind::Tree | EntryKind::Commit | EntryKind::Link) => {
             bail!("entry at {} is not a file but a {mode:?}", file.display())
         }
         // found a file
-        EntryKind::Blob | EntryKind::BlobExecutable => Ok(tree_entry.object_id()),
+        EntryKind::Blob | EntryKind::BlobExecutable => Ok(Some(tree_entry.object_id())),
     }
+}
+
+fn resolve_diff_base_commit<'repo>(
+    repo: &'repo Repository,
+    diff_base_revision: Option<&str>,
+) -> Result<Commit<'repo>> {
+    let Some(diff_base_revision) = diff_base_revision else {
+        return Ok(repo.head_commit()?);
+    };
+
+    if let Ok(mut reference) = repo.find_reference(diff_base_revision) {
+        return Ok(reference.peel_to_commit()?);
+    }
+
+    if let Ok(object_id) = diff_base_revision.parse::<ObjectId>() {
+        return Ok(repo.find_commit(object_id)?);
+    }
+
+    bail!("could not resolve git diff base '{diff_base_revision}' as a branch or commit SHA")
 }

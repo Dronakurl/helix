@@ -30,17 +30,51 @@ pub struct DiffProviderRegistry {
 impl DiffProviderRegistry {
     /// Get the given file from the VCS. This provides the unedited document as a "base"
     /// for a diff to be created.
-    pub fn get_diff_base(&self, file: &Path) -> Option<Vec<u8>> {
-        self.providers
-            .iter()
-            .find_map(|provider| match provider.get_diff_base(file) {
+    pub fn get_diff_base(&self, file: &Path, diff_base_revision: Option<&str>) -> Option<Vec<u8>> {
+        self.providers.iter().find_map(|provider| {
+            match provider.get_diff_base(file, diff_base_revision) {
                 Ok(res) => Some(res),
                 Err(err) => {
                     log::debug!("{err:#?}");
                     log::debug!("failed to open diff base for {}", file.display());
                     None
                 }
-            })
+            }
+        })
+    }
+
+    pub fn get_repo_root(&self, file: &Path) -> Result<PathBuf> {
+        let mut last_err = None;
+        for provider in &self.providers {
+            match provider.get_repo_root(file) {
+                Ok(repo_root) => return Ok(repo_root),
+                Err(err) => {
+                    log::debug!("{err:#?}");
+                    log::debug!("failed to resolve repo root for {}", file.display());
+                    last_err = Some(err);
+                }
+            }
+        }
+        Err(last_err.unwrap_or_else(|| anyhow!("no diff provider returns success")))
+    }
+
+    pub fn ensure_diff_base(&self, file: &Path, diff_base_revision: &str) -> Result<()> {
+        let mut last_err = None;
+        for provider in &self.providers {
+            match provider.ensure_diff_base(file, diff_base_revision) {
+                Ok(()) => return Ok(()),
+                Err(err) => {
+                    log::debug!("{err:#?}");
+                    log::debug!(
+                        "failed to validate diff base '{}' for {}",
+                        diff_base_revision,
+                        file.display()
+                    );
+                    last_err = Some(err);
+                }
+            }
+        }
+        Err(last_err.unwrap_or_else(|| anyhow!("no diff provider returns success")))
     }
 
     /// Get the current name of the current [HEAD](https://stackoverflow.com/questions/2304087/what-is-head-in-git).
@@ -102,30 +136,46 @@ enum DiffProvider {
 }
 
 impl DiffProvider {
-    fn get_diff_base(&self, file: &Path) -> Result<Vec<u8>> {
+    fn get_diff_base(&self, _file: &Path, _diff_base_revision: Option<&str>) -> Result<Vec<u8>> {
         match self {
             #[cfg(feature = "git")]
-            Self::Git => git::get_diff_base(file),
+            Self::Git => git::get_diff_base(_file, _diff_base_revision),
             Self::None => bail!("No diff support compiled in"),
         }
     }
 
-    fn get_current_head_name(&self, file: &Path) -> Result<Arc<ArcSwap<Box<str>>>> {
+    fn get_repo_root(&self, _file: &Path) -> Result<PathBuf> {
         match self {
             #[cfg(feature = "git")]
-            Self::Git => git::get_current_head_name(file),
+            Self::Git => git::get_repo_root(_file),
+            Self::None => bail!("No diff support compiled in"),
+        }
+    }
+
+    fn ensure_diff_base(&self, _file: &Path, _diff_base_revision: &str) -> Result<()> {
+        match self {
+            #[cfg(feature = "git")]
+            Self::Git => git::ensure_diff_base(_file, _diff_base_revision),
+            Self::None => bail!("No diff support compiled in"),
+        }
+    }
+
+    fn get_current_head_name(&self, _file: &Path) -> Result<Arc<ArcSwap<Box<str>>>> {
+        match self {
+            #[cfg(feature = "git")]
+            Self::Git => git::get_current_head_name(_file),
             Self::None => bail!("No diff support compiled in"),
         }
     }
 
     fn for_each_changed_file(
         &self,
-        cwd: &Path,
-        f: impl Fn(Result<FileChange>) -> bool,
+        _cwd: &Path,
+        _f: impl Fn(Result<FileChange>) -> bool,
     ) -> Result<()> {
         match self {
             #[cfg(feature = "git")]
-            Self::Git => git::for_each_changed_file(cwd, f),
+            Self::Git => git::for_each_changed_file(_cwd, _f),
             Self::None => bail!("No diff support compiled in"),
         }
     }
